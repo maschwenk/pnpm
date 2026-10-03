@@ -84,9 +84,39 @@ fn auth_header_for_package_download(
 ///
 /// [#269]: https://github.com/pnpm/pacquet/pull/269
 fn post_download_semaphore() -> &'static Semaphore {
-    static SEM: LazyLock<Semaphore> =
-        LazyLock::new(|| Semaphore::new(num_cpus::get().saturating_mul(2).max(4)));
+    static SEM: LazyLock<Semaphore> = LazyLock::new(|| {
+        Semaphore::new(cap_store_writers(num_cpus::get().saturating_mul(2).max(4)))
+    });
     &SEM
+}
+
+/// How many threads may write extracted files into the store at once on
+/// macOS, unless `PNPM_STORE_WRITE_CONCURRENCY` says otherwise.
+///
+/// APFS serializes metadata writes volume-wide (see
+/// `pnpm_deps_restorer::dir_clone_cache`), so file creation stops
+/// scaling after a few threads and then degrades as writers pile up on
+/// the kernel lock: `open(O_CREAT)` throughput on an 18-core Mac peaked
+/// at 2-8 threads and fell to a third of that at 18-36. The pools below
+/// default to one or two writers per core, so a cold install on such a
+/// machine spent most of its time in the kernel — 1,050 s of system time
+/// over 297 s of wall time for an 8k-package workspace. Capping them at
+/// four cut the store-filling phase from 272 s to 156 s.
+const MACOS_STORE_WRITE_CONCURRENCY: usize = 4;
+
+/// Clamp the size of a pool or permit set whose holders write files into
+/// the store. `PNPM_STORE_WRITE_CONCURRENCY` overrides the cap on every
+/// platform; without it only macOS is capped, at
+/// [`MACOS_STORE_WRITE_CONCURRENCY`].
+fn cap_store_writers(default: usize) -> usize {
+    static CAP: LazyLock<Option<usize>> = LazyLock::new(|| {
+        std::env::var("PNPM_STORE_WRITE_CONCURRENCY")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .or(cfg!(target_os = "macos").then_some(MACOS_STORE_WRITE_CONCURRENCY))
+    });
+    CAP.map_or(default, |cap| default.min(cap)).max(1)
 }
 
 /// Admission cap for the extract-while-downloading path (see
@@ -102,7 +132,7 @@ fn post_download_semaphore() -> &'static Semaphore {
 fn streaming_extract_semaphore() -> &'static Semaphore {
     static SEM: LazyLock<Semaphore> = LazyLock::new(|| {
         let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
-        Semaphore::new(cores.max(2))
+        Semaphore::new(cap_store_writers(cores.max(2)))
     });
     &SEM
 }
@@ -121,7 +151,7 @@ fn streaming_extract_semaphore() -> &'static Semaphore {
 fn cas_write_pool() -> Option<&'static rayon::ThreadPool> {
     static POOL: LazyLock<Option<rayon::ThreadPool>> = LazyLock::new(|| {
         rayon::ThreadPoolBuilder::new()
-            .num_threads(num_cpus::get().max(1))
+            .num_threads(cap_store_writers(num_cpus::get().max(1)))
             .thread_name(|index| format!("cas-write-{index}"))
             .build()
             .map_err(|error| {
