@@ -149,6 +149,15 @@ pub enum BuildModulesError {
         #[error(source)]
         source: std::io::Error,
     },
+
+    /// Giving a package's hard-linked store files private copies before
+    /// its build scripts run failed.
+    #[display("Failed to copy the store files of {} before running its build scripts: {source}", path.display())]
+    UnshareHardLinks {
+        path: PathBuf,
+        #[error(source)]
+        source: std::io::Error,
+    },
 }
 
 /// Drives a forced rebuild of already-installed packages. Constructed by

@@ -42,6 +42,8 @@ pub use wasi_fs::{
     create_new as create_new_with_mode, executable_access, file_link_count, lock_file,
     open_nofollow as open_file_without_following, register_sqlite_permissions, try_lock_file,
 };
+#[cfg(unix)]
+pub use unshare_hard_links::unshare_hard_links;
 pub use write_atomic::{write_atomic, write_atomic_private};
 
 mod background_drop;
@@ -68,6 +70,7 @@ mod secure_temp_lock;
 mod symlink_dir;
 #[cfg(target_os = "wasi")]
 mod wasi_fs;
+mod unshare_hard_links;
 mod write_atomic;
 
 #[cfg(target_os = "wasi")]

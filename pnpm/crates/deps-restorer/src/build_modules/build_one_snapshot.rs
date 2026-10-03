@@ -348,6 +348,13 @@ fn run_snapshot_scripts<Reporter: self::Reporter>(
     }
     dependency_bins::refresh(context, snapshot_key)?;
     dependency_bins::record_mutation(context, snapshot_key)?;
+    // The slot may be hard-linked from the store; a script that rewrites a
+    // file the package shipped with would otherwise edit the store copy.
+    #[cfg(unix)]
+    pnpm_fs::unshare_hard_links(pkg_dir).map_err(|source| BuildModulesError::UnshareHardLinks {
+        path: pkg_dir.to_path_buf(),
+        source,
+    })?;
     let result =
         run_candidate_hooks::<Reporter>(context, snapshot_key, pkg_dir, extra_bin_paths, optional);
     match result {
