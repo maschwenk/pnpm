@@ -684,6 +684,12 @@ impl CreateVirtualStore<'_> {
                 .map(|(snapshot_key, snapshot, cas_paths, cache_key, needs_build_marker)| {
                     let force_import =
                         package_content_changed(current_packages, packages, snapshot_key);
+                    let will_build = snapshot_will_run_scripts(
+                        snapshot_key,
+                        requires_build_by_snapshot.get(*snapshot_key).copied().unwrap_or(false),
+                        allow_build_policy,
+                        config.ignore_scripts,
+                    );
                     SlotLink {
                         snapshot_key,
                         snapshot,
@@ -695,6 +701,7 @@ impl CreateVirtualStore<'_> {
                         // is immutable by construction.
                         source_is_mutable: false,
                         force_import,
+                        will_build,
                         needs_build_marker_source: needs_build_marker
                             .then_some(
                                 needs_build_marker_source
@@ -886,6 +893,8 @@ impl CreateVirtualStore<'_> {
                         packages,
                         marker_path,
                         &removed_aliases_by_key,
+                        allow_build_policy,
+                        config.ignore_scripts,
                         &LinkSlotsParallel {
                             batch: "cold",
                             slots: &[],
@@ -911,6 +920,8 @@ impl CreateVirtualStore<'_> {
                     packages,
                     marker_path,
                     &removed_aliases_by_key,
+                    allow_build_policy,
+                    config.ignore_scripts,
                     &LinkSlotsParallel {
                         batch: "cold",
                         slots: &[],
@@ -1132,6 +1143,42 @@ fn snapshot_needs_build_marker(snapshot_key: &PackageKey, requires_build: bool) 
     requires_build || crate::snapshot_has_patch(snapshot_key)
 }
 
+/// Whether this install will run the snapshot's own lifecycle scripts:
+/// it ships one, scripts are on, and the allow-builds policy approves it.
+///
+/// Such a slot must not share inodes with the store. Build scripts
+/// commonly rewrite files they shipped with (`@shopify/react-native-skia`
+/// rewrites its `package.json`), and through a hard link that write lands
+/// in the CAS blob itself: the next install fails the blob's integrity
+/// check, downloads the tarball again, and runs the build again instead
+/// of hitting the side-effects cache — and every other project linking
+/// that blob sees the mutated file. pnpm imports these packages with
+/// `clone-or-copy` for the same reason (`willBeBuilt` in
+/// `createPackageImporterAsync`).
+fn snapshot_will_run_scripts(
+    snapshot_key: &PackageKey,
+    requires_build: bool,
+    allow_build_policy: &crate::AllowBuildPolicy,
+    ignore_scripts: bool,
+) -> bool {
+    requires_build
+        && !ignore_scripts
+        && allow_build_policy.check(&snapshot_key.without_peer().to_string()) == Some(true)
+}
+
+/// The import method for a slot whose build scripts will run: never a
+/// hard link (see [`snapshot_will_run_scripts`]). A reflink is still
+/// fine — it is copy-on-write — so `Auto` and `Hardlink` become
+/// `CloneOrCopy`, and explicit clone / copy settings are kept.
+fn import_method_for_build(import_method: PackageImportMethod) -> PackageImportMethod {
+    match import_method {
+        PackageImportMethod::Auto | PackageImportMethod::Hardlink => {
+            PackageImportMethod::CloneOrCopy
+        }
+        other => other,
+    }
+}
+
 fn gvs_slot_needs_rebuild(
     layout: &crate::VirtualStoreLayout,
     allow_build_policy: &crate::AllowBuildPolicy,
@@ -1169,6 +1216,9 @@ struct SlotLink<'a> {
     warm_cache_key: Option<&'a str>,
     source_is_mutable: bool,
     force_import: bool,
+    /// The slot's own lifecycle scripts run in this install, so it is
+    /// imported with [`import_method_for_build`].
+    will_build: bool,
     needs_build_marker_source: Option<&'a Path>,
     /// Whether the directory-clone cache may serve this slot — see
     /// [`dir_clone_cacheable`].
@@ -1263,6 +1313,8 @@ fn link_cold_chunk<Reporter: self::Reporter>(
     packages: &HashMap<PackageKey, PackageMetadata>,
     marker_path: Option<&Path>,
     removed_aliases_by_key: &HashMap<PackageKey, Vec<PkgName>>,
+    allow_build_policy: &crate::AllowBuildPolicy,
+    ignore_scripts: bool,
     template: &LinkSlotsParallel<'_>,
 ) -> Result<(), CreateVirtualStoreError> {
     let cold_slots: Vec<SlotLink<'_>> = chunk
@@ -1277,6 +1329,12 @@ fn link_cold_chunk<Reporter: self::Reporter>(
                 warm_cache_key: None,
                 source_is_mutable: capture.source_is_mutable,
                 force_import: capture.force_import,
+                will_build: snapshot_will_run_scripts(
+                    capture.snapshot_key,
+                    capture.requires_build,
+                    allow_build_policy,
+                    ignore_scripts,
+                ),
                 needs_build_marker_source: needs_build.then_some(marker_path).flatten(),
                 dir_clone_cacheable: dir_clone_cacheable(
                     packages,
@@ -1350,7 +1408,11 @@ fn link_slots_parallel<Reporter: self::Reporter>(
             crate::CreateVirtualDirBySnapshot {
                 layout,
                 cas_paths: slot.cas_paths,
-                import_method,
+                import_method: if slot.will_build {
+                    import_method_for_build(import_method)
+                } else {
+                    import_method
+                },
                 logged_methods,
                 requester,
                 package_id: &package_id,
