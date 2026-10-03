@@ -28,6 +28,8 @@ pub use secure_temp_lock::{
     open_secure_lock_file, secure_temp_lock_dir, secure_user_lock_dir, secure_user_lock_file_path,
 };
 pub use symlink_dir::*;
+#[cfg(unix)]
+pub use unshare_hard_links::unshare_hard_links;
 pub use write_atomic::{write_atomic, write_atomic_private};
 
 mod background_drop;
@@ -47,4 +49,5 @@ mod rename_even_across_devices;
 mod retry;
 mod secure_temp_lock;
 mod symlink_dir;
+mod unshare_hard_links;
 mod write_atomic;

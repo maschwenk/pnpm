@@ -325,6 +325,13 @@ fn run_snapshot_scripts<Reporter: self::Reporter>(
         return Ok(Some(false));
     }
     context.progress.slot_mutations.store(true, Ordering::Relaxed);
+    // The slot may be hard-linked from the store; a script that rewrites a
+    // file the package shipped with would otherwise edit the store copy.
+    #[cfg(unix)]
+    pnpm_fs::unshare_hard_links(pkg_dir).map_err(|error| BuildModulesError::UnshareHardLinks {
+        dir: pkg_dir.to_path_buf(),
+        error,
+    })?;
     let result =
         run_candidate_hooks::<Reporter>(context, snapshot_key, pkg_dir, extra_bin_paths, optional);
     match result {

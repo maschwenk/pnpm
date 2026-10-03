@@ -108,6 +108,16 @@ pub enum BuildModulesError {
     /// stored `added` / `deleted` diff on top of the pristine files.
     #[diagnostic(transparent)]
     MaterializeSideEffects(#[error(source)] ImportIndexedDirError),
+
+    /// Giving a package's hard-linked store files private copies before
+    /// its build scripts run failed.
+    #[display("Failed to copy the store files of {dir:?} before running its build scripts: {error}")]
+    #[diagnostic(code(ERR_PNPM_UNSHARE_HARD_LINKS))]
+    UnshareHardLinks {
+        dir: std::path::PathBuf,
+        #[error(source)]
+        error: std::io::Error,
+    },
 }
 
 /// Drives a forced rebuild of already-installed packages. Constructed by

@@ -190,7 +190,13 @@ pub(super) fn link_warm_batch<Reporter: self::Reporter>(
                     build_marker: needs_build_marker
                         .then_some(batch.needs_build_marker_source)
                         .flatten(),
-                    needs_build: *needs_build_marker,
+                    // A store hit usually takes its build from the side-effects
+                    // cache, so on Unix it keeps hard links rather than copying
+                    // every buildable package on every reinstall. When a build
+                    // does run, the build phase unshares the slot's files first
+                    // (`run_snapshot_scripts`). Patches never write through a
+                    // link: they are applied by temp file and rename.
+                    needs_build: *needs_build_marker && !cfg!(unix),
                 },
                 snapshot_key,
                 snapshot,
