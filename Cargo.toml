@@ -370,3 +370,11 @@ debug = true
 [profile.napi-release]
 inherits = "release"
 panic = "unwind"
+
+# fork: fast-iteration profile with symbols for profiling
+[profile.prof]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+strip = false
+debug = "line-tables-only"
