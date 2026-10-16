@@ -17,8 +17,9 @@ use crate::state::DedicatedCaches;
 use futures_util::{
     FutureExt,
     future::BoxFuture,
-    stream::{FuturesUnordered, StreamExt},
+    stream::{self, StreamExt},
 };
+use pipe_trait::Pipe;
 use pnpm_package_manager::WorkspaceDependenciesInstalled;
 use std::{
     future::Future,
@@ -28,6 +29,16 @@ use std::{
     },
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
+
+/// How many projects per concurrency slot a run keeps started and not yet
+/// finished. A project waiting for its workspace dependencies hands its slot
+/// back but keeps its install in memory, so without this bound a workspace
+/// with long dependency chains keeps nearly every project in memory at once.
+///
+/// The bound cannot deadlock the run. Projects start in dependency order and
+/// wait only for projects earlier in it, so the earliest unfinished project
+/// waits for none and finishes once a slot is free.
+const STARTED_PER_SLOT: usize = 2;
 
 /// How far a project's install got, for the projects that depend on it.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -97,15 +108,15 @@ impl DedicatedProjectRuns<'_> {
         RunFuture: Future<Output = miette::Result<()>> + Send + 'static,
     {
         let order = sequence_project_dependencies(&self.projects.dependencies);
+        let concurrency =
+            usize::try_from(self.config.workspace_concurrency).unwrap_or(usize::MAX).max(1);
         let run = PipelinedRun {
             runs: self,
             states: order
                 .iter()
                 .map(|_| watch::channel(Installed::Pending).0)
                 .collect(),
-            slots: Arc::new(Semaphore::new(
-                usize::try_from(self.config.workspace_concurrency).unwrap_or(usize::MAX).max(1),
-            )),
+            slots: Arc::new(Semaphore::new(concurrency)),
             stopped: Arc::new(AtomicBool::new(false)),
             first_error: Mutex::new(None),
             caches: DedicatedCaches::default(),
@@ -120,7 +131,9 @@ impl DedicatedProjectRuns<'_> {
             .iter()
             .enumerate()
             .map(|(index, project_dir)| run.project(index, project_dir, &position))
-            .collect::<FuturesUnordered<_>>()
+            .collect::<Vec<_>>()
+            .pipe(stream::iter)
+            .buffer_unordered(concurrency.saturating_mul(STARTED_PER_SLOT))
             .collect::<()>()
             .await;
         run.first_error
@@ -250,3 +263,6 @@ where
         gate.shared()
     }
 }
+
+#[cfg(test)]
+mod tests;
